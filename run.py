@@ -32,13 +32,13 @@ class GINERegressor(LightningModule):
         self,
         num_tasks: int,
         transform: object,
-        norm: bool = False,
-        conv_layers: int = 5,
-        conv_dim: int = 195,
-        mlp_layers: int = 3,
-        mlp_dim: int = 452,
-        dropout: float = 0.0898032223483247,
-        learning_rate: float = 0.0003381828790141078,
+        norm: bool = True,
+        conv_layers: int = 8,
+        conv_dim: int = 209,
+        mlp_layers: int = 1,
+        mlp_dim: int = 104,
+        dropout: float = 0.2488482220343721,
+        learning_rate: float = 0.001432167801777256,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -127,7 +127,7 @@ class GINERegressor(LightningModule):
             prog_bar=True,
             on_step=False,
             on_epoch=True,
-            batch_size=y_hat.size(0),
+            batch_size=55,
         )
         self.log(
             "val_r2_rv",
@@ -136,7 +136,7 @@ class GINERegressor(LightningModule):
             on_step=False,
             on_epoch=True,
             logger=False,
-            batch_size=y_hat.size(0),
+            batch_size=55,
         )
         self.log(
             "val_mse",
@@ -144,7 +144,7 @@ class GINERegressor(LightningModule):
             prog_bar=True,
             on_step=False,
             on_epoch=True,
-            batch_size=y_hat.size(0),
+            batch_size=55,
         )
         self.log(
             "val_mae",
@@ -152,7 +152,7 @@ class GINERegressor(LightningModule):
             prog_bar=True,
             on_step=False,
             on_epoch=True,
-            batch_size=y_hat.size(0),
+            batch_size=55,
         )
 
     def test_step(self, batch: Batch, batch_idx: int):
@@ -169,7 +169,7 @@ class GINERegressor(LightningModule):
             prog_bar=True,
             on_step=False,
             on_epoch=True,
-            batch_size=101,
+            batch_size=55,
         )
         self.log(
             "test_r2_rv",
@@ -178,7 +178,7 @@ class GINERegressor(LightningModule):
             on_step=False,
             on_epoch=True,
             logger=False,
-            batch_size=101,
+            batch_size=55,
         )
         self.log(
             "test_mse",
@@ -186,7 +186,7 @@ class GINERegressor(LightningModule):
             prog_bar=True,
             on_step=False,
             on_epoch=True,
-            batch_size=101,
+            batch_size=55,
         )
         self.log(
             "test_mae",
@@ -194,7 +194,7 @@ class GINERegressor(LightningModule):
             prog_bar=True,
             on_step=False,
             on_epoch=True,
-            batch_size=101,
+            batch_size=55,
         )
 
     def configure_optimizers(self):
@@ -215,7 +215,7 @@ if __name__ == "__main__":
     datamodule = MNET(path, name=a.dataset)
 
     # Select task
-    datamodule = MNET(path, name=a.dataset, taskid=10)
+    datamodule = MNET(path, name=a.dataset, taskid=9)
     model = GINERegressor(datamodule.num_tasks, datamodule.transform)
     checkpoint_callback = ModelCheckpoint(monitor="val_r2", mode="max", save_top_k=1)
     trainer = Trainer(gpus=1, max_epochs=25, callbacks=[checkpoint_callback])

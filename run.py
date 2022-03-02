@@ -1,0 +1,224 @@
+import os
+import time
+import pandas as pd
+import pickle
+import numpy as np
+from rdkit import Chem
+import torch
+import torch.nn.functional as F
+from torch.nn import (
+    ModuleList,
+    Sequential,
+    Embedding,
+    Linear,
+    BatchNorm1d,
+    ReLU,
+    Dropout,
+)
+import argparse
+from torch_sparse import SparseTensor
+from pytorch_lightning import LightningModule
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning import Trainer
+from torch_geometric import seed_everything
+from torch_geometric.nn import GINEConv, global_add_pool
+from torch_geometric.data import Batch
+from molgnn.metrics import MeanSquaredError, R2Score, MeanAbsoluteError
+from molgnn.datasets import MNET
+
+
+class GINERegressor(LightningModule):
+    def __init__(
+        self,
+        num_tasks: int,
+        transform: object,
+        norm: bool = False,
+        conv_layers: int = 5,
+        conv_dim: int = 195,
+        mlp_layers: int = 3,
+        mlp_dim: int = 452,
+        dropout: float = 0.0898032223483247,
+        learning_rate: float = 0.0003381828790141078,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.num_tasks = num_tasks
+        self.transform = transform
+        self.embedding = Embedding(100, conv_dim)
+        self.edge_embedding = Embedding(4, conv_dim)
+
+        self.convs = ModuleList()
+        for _ in range(conv_layers):
+            mlp = Sequential(
+                Linear(conv_dim, 2 * conv_dim),
+                BatchNorm1d(2 * conv_dim),
+                ReLU(),
+                Linear(2 * conv_dim, conv_dim),
+                BatchNorm1d(conv_dim),
+                ReLU(),
+            )
+            conv = GINEConv(mlp, train_eps=True)
+            self.convs.append(conv)
+            in_channels = conv_dim
+
+        self.norms = None
+        if norm:
+            self.norms = ModuleList()
+            for _ in range(conv_layers):
+                self.norms.append(BatchNorm1d(conv_dim))
+
+        fc = []
+        for i in range(mlp_layers - 1):
+            fc += [
+                Sequential(
+                    Linear(in_channels, mlp_dim),
+                    BatchNorm1d(mlp_dim),
+                    ReLU(),
+                    Dropout(p=dropout),
+                )
+            ]
+            in_channels = mlp_dim
+        fc += [Linear(in_channels, num_tasks)]
+        self.regressor = ModuleList(fc)
+        self.lr = learning_rate
+
+        self.val_r2 = R2Score(num_outputs=num_tasks)
+        self.test_r2 = R2Score(num_outputs=num_tasks)
+        self.val_r2_rv = R2Score(num_outputs=num_tasks, multioutput="raw_values")
+        self.test_r2_rv = R2Score(num_outputs=num_tasks, multioutput="raw_values")
+        self.val_mse = MeanSquaredError()
+        self.test_mse = MeanSquaredError()
+        self.val_mae = MeanAbsoluteError()
+        self.test_mae = MeanAbsoluteError()
+
+    def forward(
+        self, x: Tensor, edge_index: SparseTensor, edge_attr: Tensor, batch: Tensor
+    ) -> Tensor:
+        x = self.embedding(x)
+        edge_attr = self.edge_embedding(edge_attr)
+        if self.norms is not None:
+            for bn, conv in zip(self.norms, self.convs):
+                x = F.relu(bn(conv(x, edge_index, edge_attr)))
+        else:
+            for conv in self.convs:
+                x = F.relu(conv(x, edge_index, edge_attr))
+        x = global_add_pool(x, batch)
+        for nn in self.regressor:
+            x = nn(x)
+        return x
+
+    def training_step(self, batch: Batch, batch_idx: int):
+        y_hat = self(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+        train_loss = F.mse_loss(y_hat, batch.y)
+        return train_loss
+
+    def validation_step(self, batch: Batch, batch_idx: int):
+        y = self.transform.inverse_transform(batch.y)
+        y_hat = self(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+        y_hat = self.transform.inverse_transform(y_hat)
+        self.val_r2(y_hat, y)
+        self.val_r2_rv(y_hat, y)
+        self.val_mse(y_hat, y)
+        self.val_mae(y_hat, y)
+        self.log(
+            "val_r2",
+            self.val_r2,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=y_hat.size(0),
+        )
+        self.log(
+            "val_r2_rv",
+            self.val_r2_rv,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            logger=False,
+            batch_size=y_hat.size(0),
+        )
+        self.log(
+            "val_mse",
+            self.val_mse,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=y_hat.size(0),
+        )
+        self.log(
+            "val_mae",
+            self.val_mae,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=y_hat.size(0),
+        )
+
+    def test_step(self, batch: Batch, batch_idx: int):
+        y = self.transform.inverse_transform(batch.y)
+        y_hat = self(batch.x, batch.edge_index, batch.edge_attr, batch.batch)
+        y_hat = self.transform.inverse_transform(y_hat)
+        self.test_r2(y_hat, y)
+        self.test_r2_rv(y_hat, y)
+        self.test_mse(y_hat, y)
+        self.test_mae(y_hat, y)
+        self.log(
+            "test_r2",
+            self.test_r2,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=101,
+        )
+        self.log(
+            "test_r2_rv",
+            self.test_r2_rv,
+            prog_bar=False,
+            on_step=False,
+            on_epoch=True,
+            logger=False,
+            batch_size=101,
+        )
+        self.log(
+            "test_mse",
+            self.test_mse,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=101,
+        )
+        self.log(
+            "test_mae",
+            self.test_mae,
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=101,
+        )
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=self.lr)
+
+
+if __name__ == "__main__":
+
+    seed_everything(123)
+
+    # read dataset name
+    parser = argparse.ArgumentParser()
+    parser.add_argument("dataset", help="moleculenet dataset")
+    a = parser.parse_args()
+
+    # load datamodule
+    path = os.path.join(os.path.expanduser("~"), "data", "mnet")
+    datamodule = MNET(path, name=a.dataset)
+
+    # Select task
+    datamodule = MNET(path, name=a.dataset, taskid=10)
+    model = GINERegressor(datamodule.num_tasks, datamodule.transform)
+    checkpoint_callback = ModelCheckpoint(monitor="val_r2", mode="max", save_top_k=1)
+    trainer = Trainer(gpus=1, max_epochs=25, callbacks=[checkpoint_callback])
+    trainer.fit(model, datamodule=datamodule)
+    val_score_dict = trainer.validate(datamodule=datamodule, ckpt_path="best")[0]
+    print(val_score_dict)

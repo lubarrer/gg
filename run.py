@@ -16,6 +16,7 @@ from torch.nn import (
     Dropout,
 )
 import argparse
+from torch import Tensor
 from torch_sparse import SparseTensor
 from pytorch_lightning import LightningModule
 from pytorch_lightning.callbacks import ModelCheckpoint
@@ -25,8 +26,11 @@ from torch_geometric.nn import GINEConv, global_add_pool
 from torch_geometric.data import Batch
 from molgnn.metrics import MeanSquaredError, R2Score, MeanAbsoluteError
 from molgnn.datasets import MNET
+from gg.ga import Genetic
+from gg.moves import Crossover, Mutate
+from gg.score import PytorchScoringFunction
 
-
+# Ax optimized model architecture
 class GINERegressor(LightningModule):
     def __init__(
         self,
@@ -201,6 +205,7 @@ class GINERegressor(LightningModule):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
 
 
+# Train Model
 if __name__ == "__main__":
 
     seed_everything(123)
@@ -222,3 +227,59 @@ if __name__ == "__main__":
     trainer.fit(model, datamodule=datamodule)
     val_score_dict = trainer.validate(datamodule=datamodule, ckpt_path="best")[0]
     print(val_score_dict)
+
+    # Graph generation
+    filename = os.path.join(os.getcwd(), "data.csv")
+    params = {
+        "generations": 50,
+        "population_size": 200,
+        "mating_pool_size": 200,
+        "prune_population": True,
+        "max_score": 20.0,
+        "filename": filename,
+    }
+
+    co = Crossover(n_tries=10)
+    mu = Mutate(rate=0.01, n_tries=10, size_mean=39.15, size_std=3.50)
+    sc = PytorchScoringFunction(filename, model, yt, sa_score=False, cycle_score=False)
+    ga = Genetic(co, mu, sc, params)
+
+    t0 = time.time()
+    results, population, generations_list = ga()
+    t1 = time.time()
+
+    # Create file path?
+    base_dir = os.path.basename(os.getcwd())
+    time = time.time()
+    if not os.path.exists("csv"):
+        os.mkdir("csv")
+
+    filename = "csv/{}_{}.csv".format(base_dir, time)
+
+    # Create a list of generated results
+    unique_population, unique_results = [], []
+    i = 0
+    for pop, res in zip(population, results):
+        sml = Chem.MolToSmiles(population[i])
+        unique_population.append(sml)
+        unique_results.append(results[i])
+        i += 1
+
+    df = pd.DataFrame.from_dict(
+        {"population": unique_population, "results": unique_results}
+    )
+    df.to_csv(filename)
+
+    # Evaluate results
+    print(results[0], Chem.MolToSmiles(population[0]))
+    print(
+        "max score {}, mean {} +/- {}".format(
+            max(results), np.array(results).mean(), np.array(results).std()
+        )
+    )
+    print(
+        "mean generations {} +/- {}".format(
+            np.array(generations_list).mean(), np.array(generations_list).std()
+        )
+    )
+    print("time {} minutes".format((t1 - t0) / 60.0))
